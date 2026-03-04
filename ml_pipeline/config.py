@@ -1,7 +1,8 @@
 import os
 
 # --- Paths ---
-DATA_DIR = os.path.join(os.getcwd(), 'data') # Adjust as needed
+# DATA_DIR = os.path.join(os.getcwd(), 'data') # Adjust as needed
+DATA_DIR = "/kaggle/input/datasets/kushalbhargav/finhealthzindi/"
 TRAIN_PATH = os.path.join(DATA_DIR, 'Train.csv')
 TEST_PATH = os.path.join(DATA_DIR, 'Test.csv')
 SUBMISSION_PATH = 'submission_pipeline.csv'
