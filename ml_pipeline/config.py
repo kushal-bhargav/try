@@ -146,6 +146,17 @@ LOGISTIC_PARAMS = {
     'solver': 'lbfgs'
 }
 
+# Level 2 Meta-Learner Settings (CatBoost)
+META2_PARAMS = {
+    'iterations': 1000,
+    'learning_rate': 0.05,
+    'depth': 6,
+    'loss_function': 'MultiClass',
+    'eval_metric': 'MultiClass',
+    'random_seed': RANDOM_STATE,
+    'verbose': 0
+}
+
 # --- Cross-Validation ---
 N_SPLITS = 10    # Increased to match Gold code (10 for trees)
 N_SPLITS_SVM = 5 # SVM is slow, keep at 5
