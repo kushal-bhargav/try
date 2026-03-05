@@ -203,9 +203,19 @@ class PipelineEngine:
                 continue
             
             print(f"  Refining for {ctry} ({tr_mask.sum()} samples)...")
+            
+            # [FIX] Robustly ensure categorical dtypes for the local slice
+            X_tr_local = X_train[tr_mask].copy()
+            X_te_local = X_test[te_mask].copy()
+            
+            if cat_features:
+                for col in cat_features:
+                    X_tr_local[col] = X_tr_local[col].astype('category')
+                    X_te_local[col] = X_te_local[col].astype('category')
+            
             local_model = ModelFactory.get_catboost(cat_features=cat_features)
-            local_model.fit(X_train[tr_mask], y_train[tr_mask])
-            country_proba[te_mask] = local_model.predict_proba(X_test[te_mask])
+            local_model.fit(X_tr_local, y_train[tr_mask])
+            country_proba[te_mask] = local_model.predict_proba(X_te_local)
             
         # Blend: 75% Global stack, 25% Local country model
         blended = (1 - config.COUNTRY_BLEND_WEIGHT) * global_preds_probs + \

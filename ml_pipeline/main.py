@@ -23,6 +23,12 @@ def main():
     train_df, test_df = processor.load_data()
     test_ids = test_df[config.ID_COL].values
     
+    # [NEW] Optional Data Sampling for fast testing
+    if config.SAMPLE_FRACTION < 1.0:
+        print(f"  [LOG] Sampling {config.SAMPLE_FRACTION*100}% of training data...")
+        train_df = train_df.sample(frac=config.SAMPLE_FRACTION, random_state=config.RANDOM_STATE)
+        print(f"  [LOG] New training size: {len(train_df)}")
+    
     print("\nPre-processing and Feature Engineering (Dynamic Indicators)...")
     X, y, X_encoded, X_scaled = processor.fit_transform(train_df)
     X_test, X_test_encoded, X_test_scaled = processor.transform(test_df)
