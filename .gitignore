@@ -1,0 +1,17 @@
+/backend
+/frontend
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+.env
+
+# Data / Submissions
+*.csv
+!ml_pipeline/data/*.csv  # Keep data if it's supposed to be there, but usually we ignore it
+data/
+outputs/

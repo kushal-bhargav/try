@@ -5,6 +5,16 @@ from .data_processor import DataProcessor
 from .pipeline_engine import PipelineEngine
 from .utils import analyze_class_imbalance
 
+def save_submission(ids, probs, filename):
+    """Helper to save a submission file from probabilities."""
+    preds = np.argmax(probs, axis=1)
+    submission_df = pd.DataFrame({
+        config.ID_COL: ids,
+        config.TARGET_COL: [config.INVERSE_TARGET_MAPPING[p] for p in preds]
+    })
+    submission_df.to_csv(filename, index=False)
+    print(f"  [SAVE] Saved submission to {filename}")
+
 def main():
     print("Starting ML Pipeline (Zindi Gold Integrated) Execution...")
     
@@ -16,6 +26,12 @@ def main():
     print("\nPre-processing and Feature Engineering (Dynamic Indicators)...")
     X, y, X_encoded, X_scaled = processor.fit_transform(train_df)
     X_test, X_test_encoded, X_test_scaled = processor.transform(test_df)
+    
+    # [FIX] Align X_test with X schema (names and order)
+    for col in X.columns:
+        if col not in X_test.columns:
+            X_test[col] = 0
+    X_test = X_test[X.columns]
 
     # 1. Calculate Dynamic Sample Weights for rebalancing
     print("\nAnalyzing Class Imbalance and Calculating Weights...")
@@ -27,14 +43,18 @@ def main():
     engine = PipelineEngine()
     oofs, test_preds = engine.run_cross_validation(X, y, X_test, sample_weights=sample_weights)
     
-    # --- Base Model Evaluation ---
+    # --- Base Model Evaluation and Individual Submissions ---
+    print("\nEvaluating Base Models and Saving Individual Submissions...")
     for i, name in enumerate(engine.model_names):
         engine.evaluate_oof(oofs[i], y.values, model_name=name)
+        # Save individual model submission
+        clean_name = name.replace(" ", "_")
+        save_submission(test_ids, test_preds[i], f"submission_{clean_name}.csv")
 
     # 3. Meta-Stacking (2-Level)
     print("\nTraining Multi-Level Meta-Stacking...")
     engine.train_metastack(oofs, y.values)
-    final_probs = engine.predict_stack(test_preds)
+    stack_probs = engine.predict_stack(test_preds)
     
     # --- Final Stack Evaluation (OOF) ---
     print("\n[SUMMARY] Meta-Stacking Performance:")
@@ -43,23 +63,19 @@ def main():
     l1_probs = engine.meta_model_l1.predict_proba(X_meta_l1)
     meta_oof_probs = engine.meta_model_l2.predict_proba(l1_probs)
     engine.evaluate_oof(meta_oof_probs, y.values, model_name="FINAL ENSEMBLE STACK")
+    
+    # Save Meta-Stacking Level 2 submission
+    save_submission(test_ids, stack_probs, "submission_meta_stack.csv")
 
     # 4. Country Blending (Local Refinement)
     print("\nApplying Country-Specific Blending...")
     # Robustly find CatBoost features for country blend
     cat_features = X.select_dtypes(include=['category', 'object']).columns.tolist()
-    cat_indices = [X.columns.get_loc(c) for c in cat_features]
-    final_probs = engine.apply_country_blend(X, y.values, X_test, final_probs, cat_features=cat_indices)
+    final_probs = engine.apply_country_blend(X, y.values, X_test, stack_probs, cat_features=cat_features)
     
-    # 5. Save Submission
-    final_preds = np.argmax(final_probs, axis=1)
-    submission_df = pd.DataFrame({
-        config.ID_COL: test_ids,
-        config.TARGET_COL: [config.INVERSE_TARGET_MAPPING[p] for p in final_preds]
-    })
-    
-    submission_df.to_csv(config.SUBMISSION_PATH, index=False)
-    print(f"\nPhase 5 Complete! Submission saved to {config.SUBMISSION_PATH}")
+    # 5. Save Final Submission
+    save_submission(test_ids, final_probs, config.SUBMISSION_PATH)
+    print(f"\nPhase 5 Complete! All submissions saved. Final: {config.SUBMISSION_PATH}")
 
 if __name__ == "__main__":
     main()
