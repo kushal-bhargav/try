@@ -2,6 +2,11 @@ import re
 import numpy as np
 import pandas as pd
 from sklearn.neighbors import NearestNeighbors
+from scipy.stats import entropy, chi2_contingency
+from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import recall_score
+from catboost import CatBoostClassifier, Pool
+from . import config
 
 class CSMOUTE:
     """
@@ -92,65 +97,94 @@ class CSMOUTE:
         keep_idx = np.argsort(dists)[::-1][:n_keep]
         return keep_idx
 
-def normalize_categorical(x):
-    """Robust handling of categorical variants."""
-    if pd.isna(x):
-        return "missing"
+def normalize_categorical(val):
+    if pd.isna(val) or val == '':
+        return 'missing'
     
-    DONT_KNOW_SET = {
-        "don't know", "dont know", "don't know / doesn't apply", 
-        "don?t know / doesn?t apply", "do not know", "do not know / n/a", 
-        "do not know / na", "n/a", "na"
-    }
+    # Standardize to lowercase and strip whitespace/LRM marks
+    s = str(val).lower().strip().replace('\u200e', '')
     
-    s = str(x).strip().lower()
-    s = s.replace("'", "'").replace("`", "'")
-    s = s.replace("don?t", "don't").replace("doesn?t", "doesn't")
-    s = re.sub(r"\(.*?\)", "", s).strip()
-    s = re.sub(r"\s+", " ", s)
+    # 1. Unify "Don't Know" variants
+    if re.search(r"don[?'\u2019]?t\s+know|do\s+not\s+know|don\?t\s+know|no\s+s\u00e9|know\s+or\s+n/a", s):
+        return 'unknown'
     
-    if s in DONT_KNOW_SET: return "dont_know"
-    if s in {"refused"}: return "refused"
-    if s in {"missing", "", "0"}: return "missing"
-    if s == "used to have but don't have now": return "used to have"
+    # 2. Unify "Refused" variants
+    if re.search(r"refuse|no\s+respon|declined", s):
+        return 'refused'
+    
+    # 3. Unify "Used to have but don't have now" variants
+    if re.search(r"used\s+to\s+have|previously\s+had", s):
+        return 'previously_had'
+    
+    # 4. Specific Junk cleaning
+    if s == '0' or s == 'none':
+        return 'no'
+    
+    # 5. Passthrough for standard values, stripping non-alpha for consistency
+    if s in ['yes', 'no']: return s
+    if 'sometimes' in s: return 'yes_sometimes'
+    if 'always' in s: return 'yes_always'
     
     return s
+from category_encoders import TargetEncoder
 
-import pandas as pd
-import numpy as np
-from scipy.stats import entropy, chi2_contingency
-from sklearn.model_selection import StratifiedKFold
-from catboost import CatBoostClassifier, Pool
-from sklearn.metrics import recall_score
+def oof_target_encode(X_tr, X_va, X_te, y_tr, cat_cols, seed=42):
+    """
+    Perform OOF Target Encoding for train, val, and test data.
+    """
+    te = TargetEncoder(cols=cat_cols, smoothing=10)
+    te.fit(X_tr[cat_cols], y_tr)
+    return te.transform(X_tr[cat_cols]), te.transform(X_va[cat_cols]), te.transform(X_te[cat_cols])
 
-def analyze_class_imbalance(y, max_weight_cap=10.0, smoothing=0.15):
-    """Computes dynamic class weights based on IR, Entropy, and Gini."""
+def analyze_class_imbalance(y, output_dir="."):
+    """Computes dynamic class weights using Gold v5 Severity scoring."""
     y = np.asarray(y)
     classes, counts = np.unique(y, return_counts=True)
     total = len(y)
-    freqs = counts / total
+    props = counts / total
 
-    # Imbalance Metrics
+    # 1. Imbalance Metrics
     ir = counts.max() / counts.min()
-    ent = entropy(freqs) / np.log(len(classes))
     cv = np.std(counts) / np.mean(counts)
-    gini = 1 - np.sum(freqs**2)
+    ent = entropy(props, base=len(classes))
+    sorted_props = np.sort(props)
+    n = len(sorted_props)
+    gini = (2 * np.sum(np.arange(1, n+1) * sorted_props)) / (n * np.sum(sorted_props)) - (n+1)/n
 
-    # Severity Assessment
+    # 2. Severity Scoring (0-7)
     severity = 0
-    if ir > 10: severity += 2
-    if freqs.min() < 0.05: severity += 2
-    if ent < 0.8: severity += 1
-    if cv > 0.5: severity += 1
-    if gini > 0.35: severity += 1
-    severity = min(severity, 7)
+    if ir > 20: severity += 3
+    elif ir > 10: severity += 2
+    elif ir > 5: severity += 1
+    
+    min_prop = props.min()
+    if min_prop < 0.05: severity += 3
+    elif min_prop < 0.10: severity += 2
+    elif min_prop < 0.20: severity += 1
+    
+    if ent < 0.80: severity += 1
 
-    # Weights: Inverse frequency with smoothing
-    weights = (total / (len(classes) * counts)) ** (1 - smoothing)
-    weights = weights / weights.min()
-    weights = np.clip(weights, 1.0, max_weight_cap)
+    # 3. Strategy Selection
+    if severity >= 5:   strategy = "AGGRESSIVE"
+    elif severity >= 3: strategy = "MODERATE"
+    elif severity >= 1: strategy = "MILD"
+    else:               strategy = "NONE"
 
-    print(f"[Imbalance] IR: {ir:.2f} | Ent: {ent:.2f} | Severity: {severity}/7")
+    # 4. Weight Calculation
+    if strategy == "AGGRESSIVE":
+        raw = total / (len(classes) * counts)
+        weights = np.sqrt(raw)
+        weights = weights / weights.min()
+        weights = np.minimum(weights, 5.0)
+    elif strategy == "MODERATE":
+        raw = total / (len(classes) * counts)
+        weights = np.power(raw, 0.5)
+        weights = weights / weights.min()
+        weights = np.minimum(weights, 3.0)
+    else:
+        weights = np.ones(len(classes))
+
+    print(f"[Imbalance] IR: {ir:.2f} | Ent: {ent:.2f} | Severity: {severity}/7 -> {strategy}")
     return weights
 
 def compute_dynamic_alpha(X, y, beta=0.999, lambda_miss=0.3, n_splits=5, seed=42):

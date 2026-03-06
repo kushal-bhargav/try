@@ -1,8 +1,6 @@
 import pandas as pd
 import numpy as np
 import time
-from category_encoders import TargetEncoder
-from category_encoders import TargetEncoder
 from sklearn.preprocessing import StandardScaler
 from . import config
 from .utils import normalize_categorical
@@ -10,12 +8,8 @@ from scipy.stats import chi2_contingency
 
 class DataProcessor:
     def __init__(self):
-        self.encoder = None
-        self.scaler = StandardScaler()
         self.missing_handling = {}
-        self.impute_cols = None
-        self.scale_cols = None
-        self.final_feature_order = None # For MICE consistency
+        self.impute_vals = {}
 
     @staticmethod
     def load_data():
@@ -23,135 +17,120 @@ class DataProcessor:
         test_df = pd.read_csv(config.TEST_PATH)
         return train_df, test_df
 
-    def _feature_engineering(self, df, y=None):
-        # ... (previous FE code remains)
-        
-        # 0. Dynamic Missingness Indicators (Chi2 based)
-        print(f"  [LOG] Analyzing missingness for {len(df.columns)} columns...")
-        start_t = time.time()
-        for i, col in enumerate(df.columns):
-            pct = df[col].isna().mean()
-            if pct > 0:
-                # Add indicator if missingness is high or has relationship with target
-                add_indicator = False
-                if pct > 0.05: # High missingness
-                    add_indicator = True
-                elif y is not None: # Check dependency
-                    table = pd.crosstab(df[col].isna(), y)
-                    if table.shape[0] >= 2:
-                        _, p, _, _ = chi2_contingency(table)
-                        if p < 0.05: add_indicator = True
-                
-                if add_indicator:
-                    df[f"{col}_isna"] = df[col].isna().astype(int)
-                    if y is not None: # Only record during fit
-                         self.missing_handling[col] = "indicator"
-            
-            if (i+1) % 20 == 0:
-                print(f"    - Processed {i+1} columns...")
-        
-        print(f"  [LOG] Missingness analysis complete. Runtime: {time.time()-start_t:.2f}s")
+    def _check_missingness_dependency(self, series, y):
+        if y is None: return False
+        table = pd.crosstab(series.isna(), y)
+        if table.shape[0] < 2: return False
+        try:
+            _, p, _, _ = chi2_contingency(table)
+            return p < 0.05
+        except:
+            return False
 
-        # 1. Zindi "Gold" Numeric Features
+    def _feature_engineering(self, df, y=None, is_tree_path=True):
+        df = df.copy()
+        
+        # 0. Structural Cleaning (Pre-Normalization)
+        if "current_problem_cash_flow" in df.columns:
+            df["current_problem_cash_flow"] = df["current_problem_cash_flow"].replace('0', 'No')
+            
+        # 0b. Dynamic Missingness Indicators
+        if y is not None:
+            for col in df.columns:
+                pct = df[col].isna().mean()
+                if pct > 0:
+                    if self._check_missingness_dependency(df[col], y) or pct > 0.20:
+                        self.missing_handling[col] = "indicator"
+                    if pd.api.types.is_numeric_dtype(df[col]):
+                        self.impute_vals[col] = df[col].median()
+                    else:
+                        m = df[col].mode()
+                        self.impute_vals[col] = m.iloc[0] if len(m) > 0 else "missing"
+
+        # Module-Based Structural Indicators (Identified in Deep Analysis)
+        modules = {
+            'mod_banking': ['has_internet_banking', 'has_debit_card'],
+            'mod_insurance': ['medical_insurance', 'funeral_insurance'],
+            'mod_records': ['offers_credit_to_customers', 'attitude_satisfied_with_achievement'],
+            'mod_owner': ['has_cellphone', 'owner_sex']
+        }
+        for mod_name, cols in modules.items():
+            if all(c in df.columns for c in cols):
+                df[f"{mod_name}_isna"] = df[cols].isna().all(axis=1).astype(int)
+
+        for col, strategy in self.missing_handling.items():
+            if col in df.columns and strategy == "indicator":
+                # Only add if not already covered by a module indicator
+                if not any(col in mc for mc in modules.values()):
+                    df[f"{col}_isna"] = df[col].isna().astype(int)
+
+        # 1. Numeric Features
         if "business_turnover" in df.columns and "business_expenses" in df.columns:
             t = pd.to_numeric(df["business_turnover"], errors="coerce")
             e = pd.to_numeric(df["business_expenses"],  errors="coerce")
-            df["profit"]          = t - e
-            df["profit_margin"]   = df["profit"] / (t + 1.0)
-            df["turnover_ratio"]  = t / (e + 1.0)
-            df["is_profitable"]   = (t > e).astype(int)
+            df["profit"] = t - e
+            df["profit_margin"] = df["profit"] / (t + 1.0)
+            df["health_ratio"] = t / (e + 1.0)
         
-        if "personal_income" in df.columns and "business_turnover" in df.columns:
-            p = pd.to_numeric(df["personal_income"],   errors="coerce")
-            t = pd.to_numeric(df["business_turnover"], errors="coerce")
-            df["income_ratio"] = p / (t + 1.0)
-            df["income_to_expense_ratio"] = p / (pd.to_numeric(df["business_expenses"], errors="coerce") + 1.0)
+        if "personal_income" in df.columns and "business_expenses" in df.columns:
+            p, e = pd.to_numeric(df["personal_income"], "coerce"), pd.to_numeric(df["business_expenses"], "coerce")
+            df["personal_coverage"] = p / (e + 1.0)
 
         if "business_age_years" in df.columns and "business_age_months" in df.columns:
-            yr = pd.to_numeric(df["business_age_years"],  errors="coerce")
-            mo = pd.to_numeric(df["business_age_months"], errors="coerce")
-            df["biz_months"] = yr * 12 + mo
-            df["turnover_per_month"] = pd.to_numeric(df["business_turnover"], errors="coerce") / (df["biz_months"] + 1)
+            yr, mo = pd.to_numeric(df["business_age_years"], "coerce"), pd.to_numeric(df["business_age_months"], "coerce")
+            # Logic: If yr is 0, mo is likely the signal.
+            df["biz_months"] = yr * 12 + mo.fillna(0)
 
-        # 2. Log Transforms (Winning strategy used clipped log1p)
-        for src, out in [("business_turnover", "turnover_log"),
-                         ("business_expenses",  "expenses_log"),
-                         ("personal_income",    "income_log")]:
-            if src in df.columns:
-                val = pd.to_numeric(df[src], errors="coerce")
-                df[out] = np.log1p(np.clip(val, 0, None))
-
-        # 3. Insurance Aggregation
-        insurance_cols = ['medical_insurance', 'funeral_insurance']
-        df['total_insurance_score'] = 0
-        for col in insurance_cols:
-            if col in df.columns:
-                df['total_insurance_score'] += df[col].map({
-                    'Never had': 0, 
-                    'Used to have but don’t have now': 1, 
-                    'Currently have': 2
-                }).fillna(0)
-
-        # 4. Categorical Normalization (norm_cat)
-        cat_cols = [c for c in df.columns if c in config.CATEGORICAL_FEATURES]
-        for c in cat_cols:
+        # 2. Categorical Normalization & Interactions
+        cat_cols_to_norm = [c for c in df.columns if c in config.CATEGORICAL_FEATURES]
+        for c in cat_cols_to_norm:
             df[c] = df[c].map(normalize_categorical)
+            
+        # 2b. High-Signal Interactions (Identified in Deep Analysis)
+        # Funeral Insurance is a massive discriminator
+        if "funeral_insurance" in df.columns:
+            if "medical_insurance" in df.columns:
+                df["feat_full_insurance"] = ((df["funeral_insurance"] == 'yes') & (df["medical_insurance"] == 'yes')).astype(int)
+            if "has_internet_banking" in df.columns:
+                df["feat_funeral_banking"] = ((df["funeral_insurance"] == 'yes') & (df["has_internet_banking"] == 'yes')).astype(int)
+                
+        # 2c. Financial Usage Index
+        finance_cols = ['has_mobile_money', 'has_credit_card', 'has_loan_account', 'has_internet_banking', 'has_debit_card', 'has_insurance']
+        available_finance = [c for c in finance_cols if c in df.columns]
+        if available_finance:
+            df["financial_usage_index"] = df[available_finance].eq("yes").sum(axis=1)
 
-        # 5. Age bins
-        age_bins = [0, 25, 35, 45, 55, 65, 120]
-        age_labels = ['<25', '25-34', '35-44', '45-54', '55-64', '65+']
-        if 'owner_age' in df.columns:
-            df['owner_age_bins'] = pd.cut(df['owner_age'], bins=age_bins, labels=age_labels)
-        
+        # 2d. Age Binning (Identified in Deep Analysis)
+        if "owner_age" in df.columns:
+            age = pd.to_numeric(df["owner_age"], errors="coerce")
+            df["owner_age_bins"] = pd.cut(age, bins=[0, 18, 25, 35, 45, 55, 65, 120], 
+                                         labels=['<18', '18-25', '26-35', '36-45', '46-55', '56-65', '65+']).astype(str)
+            df["owner_age_bins"] = df["owner_age_bins"].fillna("missing")
+
+        # 3. Log Branch
+        if not is_tree_path:
+            for src in ["business_turnover", "business_expenses", "personal_income", "profit"]:
+                if src in df.columns:
+                    df[f"{src}_log"] = np.log1p(np.clip(pd.to_numeric(df[src], "coerce"), 0, None))
+
         return df
 
     def _impute_and_format(self, df):
-        # Mode imputation for categorical
         for col in config.CATEGORICAL_FEATURES:
             if col in df.columns:
-                df[col] = df[col].fillna(df[col].mode()[0])
-                df[col] = df[col].astype('category')
-        
-        if 'owner_age_bins' in df.columns:
-            df['owner_age_bins'] = df['owner_age_bins'].fillna(df['owner_age_bins'].mode()[0])
-            df['owner_age_bins'] = df['owner_age_bins'].astype('category')
-            
+                m = df[col].mode()
+                df[col] = df[col].fillna(m.iloc[0] if len(m) > 0 else "missing").astype('category')
         return df
 
     def fit_transform(self, train_df):
-        print(f"\n[LOG] Starting fit_transform on {len(train_df)} records...")
-        
-        # Initial cleaning and FE
         y = train_df[config.TARGET_COL].map(config.TARGET_MAPPING)
-        print("  [LOG] Running Feature Engineering...")
-        train_df = self._feature_engineering(train_df, y=y)
-        train_df = self._impute_and_format(train_df)
-        
-        X = train_df.drop(columns=[config.ID_COL, config.TARGET_COL])
-        
-        # 1. Target Encoding (Dummy fit for main.py signature, redundant for CV)
-        print("  [LOG] Initializing Preprocessors...")
-        self.encoder = TargetEncoder(cols=config.CATEGORICAL_FEATURES)
-        self.encoder.fit(X, y)
-        
-        # NOTE: MICE and Scaling are handled INSIDE PipelineEngine for better performance
-        # and to prevent leakage during nested CV. Returning X for all outputs.
-        X_encoded = X.copy()
-        X_scaled = X.copy()
-        
-        return X, y, X_encoded, X_scaled
+        X_tree = self._impute_and_format(self._feature_engineering(train_df, y=y, is_tree_path=True))
+        X_tree = X_tree.drop(columns=[config.ID_COL, config.TARGET_COL])
+        X_linear = self._feature_engineering(train_df, y=y, is_tree_path=False).drop(columns=[config.ID_COL, config.TARGET_COL])
+        return X_tree, y, X_linear
 
     def transform(self, test_df):
-        print(f"\n[LOG] Starting transform on {len(test_df)} records...")
-        test_df = self._feature_engineering(test_df)
-        
-        # Add indicators for columns that were identified as missing in train
-        for col in self.missing_handling:
-            if col in test_df.columns:
-                test_df[f"{col}_isna"] = test_df[col].isna().astype(int)
-
-        test_df = self._impute_and_format(test_df)
-        X_test = test_df.drop(columns=[config.ID_COL])
-        
-        # Returning X_test for all to avoid redundant expensive computations
-        return X_test, X_test.copy(), X_test.copy()
+        X_tree_test = self._impute_and_format(self._feature_engineering(test_df, is_tree_path=True))
+        X_tree_test = X_tree_test.drop(columns=[config.ID_COL])
+        X_linear_test = self._feature_engineering(test_df, is_tree_path=False).drop(columns=[config.ID_COL])
+        return X_tree_test, X_linear_test

@@ -2,7 +2,7 @@ import os
 
 # --- Paths ---
 # DATA_DIR = os.path.join(os.getcwd(), 'data') # Adjust as needed
-DATA_DIR = "/kaggle/input/datasets/kushalbhargav/finhealthzindi/"
+DATA_DIR = os.path.join(os.getcwd(), 'data')
 TRAIN_PATH = os.path.join(DATA_DIR, 'Train.csv')
 TEST_PATH = os.path.join(DATA_DIR, 'Test.csv')
 SUBMISSION_PATH = 'submission_pipeline.csv'
@@ -11,7 +11,7 @@ SUBMISSION_PATH = 'submission_pipeline.csv'
 RANDOM_STATE = 42
 
 # --- Execution Settings ---
-SAMPLE_FRACTION = 1.00 # Set to < 1.0 for fast testing (e.g., 0.1)
+SAMPLE_FRACTION = 1.0 # Set to < 1.0 for fast testing (e.g., 0.1)
 
 # --- Target Constants ---
 TARGET_COL = 'Target'
@@ -25,10 +25,11 @@ NUMERICAL_FEATURES = [
     'business_turnover', 'business_age_years', 'business_age_months'
 ]
 
-# Engineered numerical features to be added
+# Engineered features from deep analysis
 ENGINEERED_NUMERICAL = [
-    'profit_margin', 'income_to_expense_ratio', 'turnover_per_month',
-    'total_insurance_score', 'is_profitable'
+    'profit', 'profit_margin', 'health_ratio', 'personal_coverage', 'biz_months',
+    'mod_banking_isna', 'mod_insurance_isna', 'mod_records_isna', 'mod_owner_isna',
+    'feat_full_insurance', 'feat_funeral_banking', 'financial_usage_index'
 ]
 
 CATEGORICAL_FEATURES = [
@@ -47,7 +48,16 @@ CATEGORICAL_FEATURES = [
     'uses_friends_family_savings', 'uses_informal_lender', 'owner_age_bins'
 ]
 
-# --- Hyperparameters# --- Stacking and Dynamic Alpha Settings ---
+# --- Robust Categorical Normalization Sets ---
+DONT_KNOW_SET = {
+    "don't know", "dont know", "don't know",
+    "don't know / doesn't apply", "don?t know / doesn?t apply", "don't know / doesn't apply",
+    "do not know", "do not know / n/a", "do not know / na", "n/a", "na"
+}
+REFUSED_SET = {"refused"}
+MISSING_SET = {"missing", "", "0"}
+
+# --- Stacking and Dynamic Alpha Settings ---
 BETA_ALPHA = 0.999
 LAMBDA_MISSING = 0.3
 SVM_STACK_WEIGHT = 0.5
@@ -72,7 +82,6 @@ LGBM_PARAMS = {
     'verbosity': -1,
 }
 
-# CatBoost Params (Winning)
 CATBOOST_PARAMS = {
     'loss_function': 'MultiClass',
     'eval_metric': 'MultiClass',
@@ -86,13 +95,14 @@ CATBOOST_PARAMS = {
     'od_type': 'Iter',
     'od_wait': 1500,
     'verbose': 0,
-    'task_type': 'GPU', # Use GPU
+    'task_type': 'GPU',
     'devices': '0',
     'random_seed': RANDOM_STATE,
 }
 
 # XGBoost Params (Winning)
 XGB_PARAMS = {
+    'n_estimators': 1500,
     'objective': 'multi:softprob',
     'num_class': 3,
     'eval_metric': 'mlogloss',
@@ -104,7 +114,7 @@ XGB_PARAMS = {
     'reg_alpha': 0.1,
     'reg_lambda': 0.1,
     'tree_method': 'hist',
-    'device': 'cuda',
+    'device': 'cuda', # Enabled GPU
     'random_state': RANDOM_STATE,
     'verbosity': 0
 }
@@ -145,22 +155,23 @@ META_RF_PARAMS = {
 LOGISTIC_PARAMS = {
     'max_iter': 6000,
     'random_state': RANDOM_STATE,
-    'multi_class': 'multinomial',
     'solver': 'lbfgs'
 }
 
 # Level 2 Meta-Learner Settings (CatBoost)
 META2_PARAMS = {
-    'iterations': 1000,
-    'learning_rate': 0.05,
+    'iterations': 1500,
+    'learning_rate': 0.03,
     'depth': 6,
     'loss_function': 'MultiClass',
     'eval_metric': 'MultiClass',
     'random_seed': RANDOM_STATE,
-    'verbose': 0
+    'verbose': 200,
+    'task_type': 'GPU',
+    'early_stopping_rounds': 50
 }
 
 # --- Cross-Validation ---
-N_SPLITS = 10    # Increased to match Gold code (10 for trees)
+N_SPLITS = 10    # Production level (10 for trees)
 N_SPLITS_SVM = 5 # SVM is slow, keep at 5
 CSMOUTE_RATIO = 0.5 # Default from Gold code

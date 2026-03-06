@@ -9,14 +9,19 @@ from . import config
 
 class ModelFactory:
     @staticmethod
-    def get_lgbm():
-        return LGBMClassifier(**config.LGBM_PARAMS)
+    def get_lgbm(class_weights=None):
+        params = config.LGBM_PARAMS.copy()
+        if class_weights is not None:
+            params['class_weight'] = {i: w for i, w in enumerate(class_weights)}
+        return LGBMClassifier(**params)
 
     @staticmethod
-    def get_catboost(cat_features=None):
+    def get_catboost(cat_features=None, class_weights=None):
         params = config.CATBOOST_PARAMS.copy()
         if cat_features:
             params['cat_features'] = cat_features
+        if class_weights is not None:
+            params['class_weights'] = class_weights
         return CatBoostClassifier(**params)
 
     @staticmethod
