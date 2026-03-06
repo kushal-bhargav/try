@@ -11,7 +11,7 @@ SUBMISSION_PATH = 'submission_pipeline.csv'
 RANDOM_STATE = 42
 
 # --- Execution Settings ---
-SAMPLE_FRACTION = 0.01 # Set to < 1.0 for fast testing (e.g., 0.1)
+SAMPLE_FRACTION = 1.00 # Set to < 1.0 for fast testing (e.g., 0.1)
 
 # --- Target Constants ---
 TARGET_COL = 'Target'
